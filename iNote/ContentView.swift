@@ -15,6 +15,8 @@ struct ContentView: View {
     @State private var showDirectoryPicker = false
     @State private var hasPresentedInitialPicker = false
     @State private var isCardFading = false
+    @State private var showViewModeSelection = false
+    @State private var hasSelectedViewMode = false
 
     var body: some View {
         ZStack {
@@ -29,9 +31,13 @@ struct ContentView: View {
             DirectoryPicker { url in
                 showDirectoryPicker = false
                 viewModel.setDirectory(url)
+                showViewModeSelection = true
             } onCancel: {
                 showDirectoryPicker = false
             }
+        }
+        .sheet(isPresented: $showViewModeSelection) {
+            viewModeSelectionScreen
         }
         .task {
             guard !hasPresentedInitialPicker else { return }
@@ -72,36 +78,37 @@ struct ContentView: View {
             ProgressView("Loading note…")
                 .progressViewStyle(.circular)
         } else if let note = viewModel.currentNote {
-            VStack(spacing: 20) {
-                Spacer()
-
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(note.fileName)
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Text(note.text)
-                        .font(.title3)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    if note.isTruncated {
-                        Text("Displayed note trimmed for quick viewing.")
-                            .font(.footnote)
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(note.fileName)
+                            .font(.headline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(note.text)
+                            .font(.title3)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+
+                        if note.isTruncated {
+                            Text("Displayed note trimmed for quick viewing.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        
+                        if viewModel.noteCount > 0 {
+                            Text(hintText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 8)
+                        }
                     }
-                }
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity, alignment: .center)
-
-                Spacer()
-
-                if viewModel.noteCount > 0 {
-                    Text("Tap anywhere to shuffle — \(viewModel.noteCount) note\(viewModel.noteCount == 1 ? "" : "s").")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    .frame(maxWidth: 520)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(minHeight: geometry.size.height)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -134,6 +141,92 @@ struct ContentView: View {
         }
     }
 
+    private var viewModeControl: some View {
+        Menu {
+            ForEach(ViewingMode.allCases, id: \.self) { mode in
+                Button {
+                    viewModel.setViewingMode(mode)
+                } label: {
+                    Label {
+                        Text(mode.menuTitle)
+                    } icon: {
+                        Image(systemName: mode == viewModel.viewingMode ? "checkmark" : mode.iconName)
+                    }
+                }
+            }
+        } label: {
+            Label(viewModel.viewingMode.menuTitle, systemImage: viewModel.viewingMode.iconName)
+                .font(.subheadline.weight(.semibold))
+        }
+        .accessibilityLabel("Change viewing mode")
+    }
+
+    private var viewModeSelectionScreen: some View {
+        VStack(spacing: 24) {
+            Text("Choose Viewing Mode")
+                .font(.title2.bold())
+                .padding(.top, 32)
+
+            VStack(spacing: 16) {
+                Button {
+                    viewModel.setViewingMode(.random)
+                    hasSelectedViewMode = true
+                    showViewModeSelection = false
+                    viewModel.shuffle()
+                } label: {
+                    VStack(spacing: 8) {
+                        Image(systemName: "shuffle")
+                            .font(.largeTitle)
+                        Text("Random Order")
+                            .font(.headline)
+                        Text("Shuffle through notes randomly")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+                }
+                .buttonStyle(.bordered)
+                .tint(.blue)
+
+                Button {
+                    viewModel.setViewingMode(.sequential)
+                    hasSelectedViewMode = true
+                    showViewModeSelection = false
+                    viewModel.shuffle()
+                } label: {
+                    VStack(spacing: 8) {
+                        Image(systemName: "text.alignleft")
+                            .font(.largeTitle)
+                        Text("Sequential Loop")
+                            .font(.headline)
+                        Text("View notes in order, looping")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+                }
+                .buttonStyle(.bordered)
+                .tint(.green)
+            }
+            .padding(.horizontal, 24)
+
+            Spacer()
+        }
+        .presentationDetents([.medium])
+    }
+
+    private var hintText: String {
+        let pluralSuffix = viewModel.noteCount == 1 ? "" : "s"
+        switch viewModel.viewingMode {
+        case .random:
+            return "Tap anywhere to shuffle — \(viewModel.noteCount) note\(pluralSuffix)."
+        case .sequential:
+            return "Tap anywhere to advance — \(viewModel.noteCount) note\(pluralSuffix) looping in order."
+        }
+    }
+
     private func shuffleWithFade() {
         guard !viewModel.isLoading else { return }
         withAnimation(.easeInOut(duration: 0.25)) {
@@ -154,11 +247,14 @@ final class NotesViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var noteCount = 0
     @Published private(set) var needsDirectorySelection = true
+    @Published private(set) var viewingMode: ViewingMode = .random
 
     var hasActiveDirectory: Bool { directoryURL != nil }
 
     private var directoryURL: URL?
     private let loaderQueue = DispatchQueue(label: "notes.random.loader", qos: .userInitiated)
+    private var noteURLs: [URL] = []
+    private var sequentialIndex = 0
 
     func setDirectory(_ url: URL) {
         guard url.hasDirectoryPath else {
@@ -168,9 +264,9 @@ final class NotesViewModel: ObservableObject {
         }
 
         directoryURL = url
+        resetNotesCache()
         needsDirectorySelection = false
         errorMessage = nil
-        shuffle()
     }
 
     func shuffle() {
@@ -179,14 +275,38 @@ final class NotesViewModel: ObservableObject {
             needsDirectorySelection = true
             return
         }
-        loadRandomNote(from: directoryURL)
+        loadNextNote(from: directoryURL)
     }
 
-    private func loadRandomNote(from directory: URL) {
+    func setViewingMode(_ mode: ViewingMode) {
+        guard viewingMode != mode else { return }
+        viewingMode = mode
+        resetSequentialIndex()
+
+        if hasActiveDirectory {
+            shuffle()
+        }
+    }
+
+    private func resetNotesCache() {
+        loaderQueue.sync {
+            self.noteURLs = []
+            self.sequentialIndex = 0
+        }
+    }
+
+    private func resetSequentialIndex() {
+        loaderQueue.sync {
+            self.sequentialIndex = 0
+        }
+    }
+
+    private func loadNextNote(from directory: URL) {
         isLoading = true
         errorMessage = nil
 
         let selectedDirectory = directory
+        let mode = viewingMode
 
         loaderQueue.async { [weak self] in
             guard let self else { return }
@@ -198,7 +318,7 @@ final class NotesViewModel: ObservableObject {
                 }
             }
 
-            let result = Self.fetchRandomNote(in: selectedDirectory)
+            let result = self.fetchNote(in: selectedDirectory, mode: mode)
 
             DispatchQueue.main.async {
                 self.isLoading = false
@@ -216,22 +336,25 @@ final class NotesViewModel: ObservableObject {
         }
     }
 
-    private static func fetchRandomNote(in directory: URL) -> Result<NotePayload, NoteError> {
+    private func fetchNote(in directory: URL, mode: ViewingMode) -> Result<NotePayload, NoteError> {
         do {
-            let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
-            let textFiles = urls.filter { $0.pathExtension.lowercased() == "txt" }
-
-            guard let randomURL = textFiles.randomElement() else {
+            try prepareNoteCacheIfNeeded(in: directory)
+            guard !noteURLs.isEmpty else {
                 throw NoteError.noTextFiles
             }
 
-            let data = try Data(contentsOf: randomURL)
-            guard let rawText = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else {
-                throw NoteError.unreadableFile(randomURL.lastPathComponent)
+            let noteURL: URL
+            switch mode {
+            case .random:
+                noteURL = noteURLs.randomElement()!
+            case .sequential:
+                let index = sequentialIndex % noteURLs.count
+                noteURL = noteURLs[index]
+                sequentialIndex = (index + 1) % noteURLs.count
             }
 
-            let note = DisplayNote.make(from: randomURL, rawText: rawText)
-            return .success(NotePayload(note: note, availableCount: textFiles.count))
+            let note = try Self.readDisplayNote(at: noteURL)
+            return .success(NotePayload(note: note, availableCount: noteURLs.count))
         } catch let error as NoteError {
             return .failure(error)
         } catch {
@@ -239,9 +362,53 @@ final class NotesViewModel: ObservableObject {
         }
     }
 
+    private func prepareNoteCacheIfNeeded(in directory: URL) throws {
+        guard noteURLs.isEmpty else { return }
+        noteURLs = try Self.fetchNoteURLs(in: directory)
+        sequentialIndex = 0
+    }
+
+    private static func fetchNoteURLs(in directory: URL) throws -> [URL] {
+        let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        return urls
+            .filter { $0.pathExtension.lowercased() == "txt" }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    private static func readDisplayNote(at url: URL) throws -> DisplayNote {
+        let data = try Data(contentsOf: url)
+        guard let rawText = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else {
+            throw NoteError.unreadableFile(url.lastPathComponent)
+        }
+        return DisplayNote.make(from: url, rawText: rawText)
+    }
+
 }
 
 // MARK: - Helpers
+
+enum ViewingMode: String, CaseIterable {
+    case random
+    case sequential
+
+    var menuTitle: String {
+        switch self {
+        case .random:
+            return "Random Order"
+        case .sequential:
+            return "Sequential Loop"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .random:
+            return "shuffle"
+        case .sequential:
+            return "text.alignleft"
+        }
+    }
+}
 
 struct DisplayNote {
     let fileName: String
